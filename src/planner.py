@@ -1,22 +1,29 @@
 import json
 import re
-from groq import Groq
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
 from .config import Config
 from .models import ExamPlan
 
 class CognitivePlanner:
     def __init__(self):
-        self.client = Groq(api_key=Config.GROQ_API_KEY)
-        self.model = Config.MODEL_NAME
+        # Initialize Google Gemini via LangChain
+        self.llm = ChatGoogleGenerativeAI(
+            model=Config.MODEL_NAME,
+            google_api_key=Config.GOOGLE_API_KEY,
+            temperature=0.2
+        )
 
     def _clean_json_string(self, raw_string: str) -> str:
+        # Standard cleanup for LLM markdown code blocks
         clean = re.sub(r"```json\s*", "", raw_string)
         clean = re.sub(r"```\s*$", "", clean)
         return clean.strip()
 
     def generate_exam_plan(self, context_text: str, enable_refinement: bool = True) -> ExamPlan:
-        # Truncate to avoid token limits if necessary
-        safe_context = context_text[:25000] + ("\n...[TRUNCATED]" if len(context_text) > 25000 else "")
+        # Gemini 1.5 Flash has a 1 Million token context window, so we rarely need to truncate.
+        # But keeping a safe limit (e.g., 100k chars) is good practice for speed.
+        safe_context = context_text[:100000] 
         
         print("Generating Initial Exam Plan...")
         initial_plan = self._generate_initial_pass(safe_context)
@@ -47,31 +54,27 @@ class CognitivePlanner:
         JSON Skeleton: {json_skeleton}
         """
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Context:\n{context}"}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2 
-        )
-        return self._parse_and_validate(response.choices[0].message.content)
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Context:\n{context}")
+        ]
+        
+        response = self.llm.invoke(messages)
+        return self._parse_and_validate(response.content)
 
     def _refine_plan(self, initial_plan: ExamPlan, context: str) -> ExamPlan:
         current_json = initial_plan.model_dump_json()
         system_prompt = "You are a Quality Assurance Editor. Fix leakage and ambiguity. Output JSON."
         
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original:\n{context}\n\nCurrent Plan:\n{current_json}"}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1
-        )
-        return self._parse_and_validate(response.choices[0].message.content)
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Original:\n{context}\n\nCurrent Plan:\n{current_json}")
+        ]
+        
+        # Lower temp for refinement
+        self.llm.temperature = 0.1
+        response = self.llm.invoke(messages)
+        return self._parse_and_validate(response.content)
 
     def _parse_and_validate(self, raw_json: str) -> ExamPlan:
         try:

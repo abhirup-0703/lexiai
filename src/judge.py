@@ -5,7 +5,7 @@ from datasets import Dataset
 from ragas.metrics import Faithfulness, AnswerRelevancy, AnswerCorrectness
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import FastEmbedEmbeddings
 from .config import Config
 
@@ -18,17 +18,18 @@ class JudgeResult:
 
 class RagasJudge:
     def __init__(self):
-        # 1. Judge LLM
-        groq_chat = ChatGroq(
+        # 1. Judge LLM (Gemini)
+        # We use a temperature of 0 for consistent grading
+        google_chat = ChatGoogleGenerativeAI(
             temperature=0,
-            model_name=Config.MODEL_NAME,
-            api_key=Config.GROQ_API_KEY
+            model=Config.MODEL_NAME,
+            google_api_key=Config.GOOGLE_API_KEY
         )
-        self.llm = LangchainLLMWrapper(groq_chat)
+        self.llm = LangchainLLMWrapper(google_chat)
         
-        # 2. Embeddings
+        # 2. Embeddings (Local - FastEmbed)
+        # We keep this local to avoid sending too many requests and to keep it fast.
         fast_embed = FastEmbedEmbeddings(model_name=Config.EMBEDDING_MODEL)
-        # Fix for Ragas validation
         self.embeddings = LangchainEmbeddingsWrapper(fast_embed)
         self.embeddings.model = Config.EMBEDDING_MODEL 
 
@@ -43,6 +44,7 @@ class RagasJudge:
         }
         dataset = Dataset.from_dict(data)
 
+        # Ragas will now use Gemini to evaluate the answer
         results = evaluate(
             dataset=dataset,
             metrics=self.metrics,
@@ -52,9 +54,22 @@ class RagasJudge:
         )
 
         def safe_get(key):
-            val = results.get(key, 0.0)
-            if isinstance(val, list): return val[0] if val else 0.0
-            return float(val) if val == val else 0.0
+            try:
+                val = results[key]
+            except KeyError:
+                return 0.0
+            
+            if isinstance(val, list):
+                if len(val) > 0:
+                    val = val[0]
+                else:
+                    return 0.0
+            
+            try:
+                f_val = float(val)
+                return f_val if f_val == f_val else 0.0
+            except (ValueError, TypeError):
+                return 0.0
 
         f_score = safe_get("faithfulness")
         r_score = safe_get("answer_relevancy")
