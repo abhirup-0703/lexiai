@@ -1,12 +1,13 @@
-from dataclasses import dataclass, asdict
-from typing import Dict
-from ragas import evaluate
+from dataclasses import dataclass
+from typing import Dict, List
+from ragas import evaluate, RunConfig
 from datasets import Dataset
 from ragas.metrics import Faithfulness, AnswerRelevancy, AnswerCorrectness
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_core.embeddings import Embeddings
 from .config import Config
 
 @dataclass
@@ -16,10 +17,26 @@ class JudgeResult:
     feedback: str
     metrics: Dict[str, float]
 
+# --- FIX 1: Wrapper to satisfy Ragas Pydantic Validation ---
+class RagasFriendlyEmbeddingsWrapper(Embeddings):
+    """
+    Wraps an embedding model to explicitly expose 'model' as a string.
+    This prevents Ragas from reading the underlying object and crashing.
+    """
+    def __init__(self, internal_embeddings, model_name: str):
+        self.internal = internal_embeddings
+        self.model = model_name  # STRICT STRING to satisfy Ragas
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self.internal.embed_documents(texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.internal.embed_query(text)
+# -----------------------------------------------------------
+
 class RagasJudge:
     def __init__(self):
         # 1. Judge LLM (Gemini)
-        # We use a temperature of 0 for consistent grading
         google_chat = ChatGoogleGenerativeAI(
             temperature=0,
             model=Config.MODEL_NAME,
@@ -28,10 +45,12 @@ class RagasJudge:
         self.llm = LangchainLLMWrapper(google_chat)
         
         # 2. Embeddings (Local - FastEmbed)
-        # We keep this local to avoid sending too many requests and to keep it fast.
+        print(f"Loading embeddings: {Config.EMBEDDING_MODEL}...")
         fast_embed = FastEmbedEmbeddings(model_name=Config.EMBEDDING_MODEL)
-        self.embeddings = LangchainEmbeddingsWrapper(fast_embed)
-        self.embeddings.model = Config.EMBEDDING_MODEL 
+        
+        # Apply the Fix
+        safe_embed = RagasFriendlyEmbeddingsWrapper(fast_embed, Config.EMBEDDING_MODEL)
+        self.embeddings = LangchainEmbeddingsWrapper(safe_embed)
 
         self.metrics = [Faithfulness(), AnswerRelevancy(), AnswerCorrectness()]
 
@@ -44,13 +63,20 @@ class RagasJudge:
         }
         dataset = Dataset.from_dict(data)
 
-        # Ragas will now use Gemini to evaluate the answer
+        # --- FIX 2: Serial Execution to prevent Gemini Timeouts ---
+        # Gemini Free Tier has strict rate limits. We force sequential processing.
+        run_config = RunConfig(
+            max_workers=1,  # Process 1 item at a time
+            timeout=120     # Give it more time per request
+        )
+        
         results = evaluate(
             dataset=dataset,
             metrics=self.metrics,
             llm=self.llm,
             embeddings=self.embeddings,
-            raise_exceptions=False 
+            raise_exceptions=False,
+            run_config=run_config
         )
 
         def safe_get(key):
@@ -67,6 +93,7 @@ class RagasJudge:
             
             try:
                 f_val = float(val)
+                # Handle NaN
                 return f_val if f_val == f_val else 0.0
             except (ValueError, TypeError):
                 return 0.0
