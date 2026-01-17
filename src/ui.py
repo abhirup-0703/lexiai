@@ -1,10 +1,16 @@
 import streamlit as st
 import time
 import os
-from .ingestion import MarkerIngestion
-from .planner import CognitivePlanner
-from .judge import RagasJudge
-from .config import Config
+
+import sys
+
+# Add the current directory to sys.path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from ingestion import MarkerIngestion
+from planner import CognitivePlanner
+from judge import RagasJudge
+from config import Config
 
 # Page Configuration
 st.set_page_config(
