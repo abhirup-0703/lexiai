@@ -8,8 +8,6 @@ langgraph
 fastembed
 python-dotenv
 langchain
-streamlit
-watchdog
 langchain-google-genai
 google-generativeai
 google-genai

@@ -69,11 +69,14 @@ def process_answer(user_input):
     
     # 2. Evaluate
     with st.spinner("👨‍🏫 Grading answer..."):
+        # NEW: Pass exemplar if available
+        exemplar = question_data.rubric.exemplar
         result = st.session_state.judge.evaluate_answer(
             question=question_data.question,
             user_answer=user_input,
             context=question_data.context_snippet,
-            criteria=question_data.rubric.criteria
+            criteria=question_data.rubric.criteria,
+            exemplar=exemplar
         )
     
     # 3. Logic Branching
@@ -146,6 +149,8 @@ with st.sidebar:
             if not st.session_state.exam_complete:
                 q = st.session_state.exam_plan.questions[st.session_state.current_q_index]
                 st.markdown(f"**Criteria:** {q.rubric.criteria}")
+                if q.rubric.exemplar:
+                     st.markdown(f"**Exemplar:** {q.rubric.exemplar}")
                 st.markdown(f"**Keywords:** {', '.join(q.rubric.key_concepts)}")
 
 # Main Chat Area

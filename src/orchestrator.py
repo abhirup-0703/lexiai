@@ -31,11 +31,17 @@ class OralExamOrchestrator:
         q_data = state["exam_plan"]["questions"][idx]
         last_answer = state["history"][-1].replace("User: ", "")
         
+        rubric = q_data.get("rubric", {})
+        
+        # EXTRACT EXEMPLAR: handle both alias cases just to be safe
+        exemplar_text = rubric.get("exemplar") or rubric.get("exemplar_answer")
+        
         result = self.judge.evaluate_answer(
             question=q_data["question"],
             user_answer=last_answer,
             context=q_data["context_snippet"],
-            criteria=q_data["rubric"]["criteria"]
+            criteria=rubric.get("criteria", ""),
+            exemplar=exemplar_text
         )
         
         print(f"\033[1;30m   >>> [Judge]: {result.feedback}\033[0m")
@@ -50,7 +56,10 @@ class OralExamOrchestrator:
             self.io.output("We seem to be stuck. Let's move to the next topic.")
             return {"retry_count": 99} 
 
-        rubric_hint = state["exam_plan"]["questions"][state["current_q_index"]]["rubric"]["criteria"]
+        q_data = state["exam_plan"]["questions"][state["current_q_index"]]
+        rubric_hint = q_data.get("rubric", {}).get("criteria", "Review the concept.")
+        
+        # Use result feedback if available in history, otherwise generic hint
         hint = f"That's not quite what I'm looking for. Hint: {rubric_hint}. Try again."
         self.io.output(hint)
         return {"history": [f"AI Hint: {hint}"], "retry_count": retries + 1}
