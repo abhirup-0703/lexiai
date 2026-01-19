@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+import json
+import re
 from ragas import evaluate, RunConfig
 from datasets import Dataset
 from ragas.metrics import Faithfulness, AnswerRelevancy, AnswerCorrectness
@@ -19,10 +21,6 @@ class JudgeResult:
     metrics: Dict[str, float]
 
 class RagasFriendlyEmbeddingsWrapper(Embeddings):
-    """
-    Wraps an embedding model to explicitly expose 'model' as a string.
-    This prevents Ragas from reading the underlying object and crashing.
-    """
     def __init__(self, internal_embeddings, model_name: str):
         self.internal = internal_embeddings
         self.model = model_name 
@@ -35,7 +33,6 @@ class RagasFriendlyEmbeddingsWrapper(Embeddings):
 
 class RagasJudge:
     def __init__(self):
-        # 1. Judge LLM (Gemini)
         self.google_chat = ChatGoogleGenerativeAI(
             temperature=0,
             model=Config.MODEL_NAME,
@@ -43,7 +40,6 @@ class RagasJudge:
         )
         self.llm = LangchainLLMWrapper(self.google_chat)
         
-        # 2. Embeddings (Local - FastEmbed)
         print(f"Loading embeddings: {Config.EMBEDDING_MODEL}...")
         fast_embed = FastEmbedEmbeddings(model_name=Config.EMBEDDING_MODEL)
         safe_embed = RagasFriendlyEmbeddingsWrapper(fast_embed, Config.EMBEDDING_MODEL)
@@ -52,37 +48,59 @@ class RagasJudge:
         self.metrics = [Faithfulness(), AnswerRelevancy(), AnswerCorrectness()]
 
     def _generate_qualitative_feedback(self, question, answer, context, rubric, exemplar=None) -> str:
-        """Generates specific text feedback using the LLM directly."""
         prompt = f"""
         You are a strict professor grading an oral exam.
-        
         Question: {question}
-        Rubric/Criteria: {rubric}
-        Context Info: {context}
+        Rubric: {rubric}
+        Context: {context}
         """
-        
         if exemplar:
-            prompt += f"\nIdeal Exemplar Answer: {exemplar}\n"
-            
-        prompt += f"\nStudent Answer: {answer}\n"
+            prompt += f"\nExemplar: {exemplar}"
+        prompt += f"\nStudent Answer: {answer}\nTask: Provide a 1-2 sentence critique."
         
-        prompt += """
-        Task: Provide a concise (1-2 sentences) critique of the answer. 
-        - If correct, acknowledge the specific good points.
-        - If incorrect, explain EXACTLY why (e.g., "You missed the concept of X" or "Your reasoning on Y is flawed").
-        - Do not give a score here, just the qualitative analysis.
-        """
         response = self.google_chat.invoke([HumanMessage(content=prompt)])
         return response.content
 
+    def generate_followup(self, original_q, answer, rubric, context) -> dict:
+        """Generates a specific follow-up question based on missing concepts."""
+        prompt = f"""
+        The student gave a partial answer (Score 3-7/10).
+        Original Q: {original_q}
+        Rubric: {rubric}
+        Student Answer: {answer}
+        
+        Task: 
+        1. Identify key concepts missing from the answer.
+        2. Generate a specific follow-up question targeting ONLY those missing concepts.
+        3. Create a simplified rubric for this follow-up.
+        
+        Output JSON:
+        {{
+            "question": "Specific follow-up question...",
+            "context_snippet": "{context}", 
+            "rubric": {{
+                "criteria": "Answer must explain [missing concept]",
+                "exemplar": "Short correct explanation of [missing concept]"
+            }}
+        }}
+        """
+        response = self.google_chat.invoke([HumanMessage(content=prompt)])
+        try:
+            clean_text = re.sub(r"```json\s*|```\s*$", "", response.content).strip()
+            return json.loads(clean_text)
+        except:
+            return {
+                "question": "Could you elaborate more on that?",
+                "context_snippet": context,
+                "rubric": {"criteria": "Elaborate on missing details."}
+            }
+
     def evaluate_answer(self, question: str, user_answer: str, context: str, criteria: str, exemplar: str = None) -> JudgeResult:
-        # 1. Generate Qualitative Feedback
+        # Qualitative Feedback
         qualitative_feedback = self._generate_qualitative_feedback(question, user_answer, context, criteria, exemplar)
 
-        # 2. Calculate Ragas Metrics
-        # Use exemplar as ground_truth if available, otherwise fallback to criteria
+        # Ragas Metrics
         ground_truth_text = exemplar if exemplar else criteria
-
         data = {
             "question": [question],
             "answer": [user_answer],
@@ -91,7 +109,6 @@ class RagasJudge:
         }
         dataset = Dataset.from_dict(data)
 
-        # Force serial execution to avoid rate limits
         run_config = RunConfig(max_workers=1, timeout=120)
         
         results = evaluate(
@@ -107,8 +124,7 @@ class RagasJudge:
             try:
                 val = results[key]
                 if isinstance(val, list) and val: val = val[0]
-                f_val = float(val)
-                return f_val if f_val == f_val else 0.0
+                return float(val) if float(val) == float(val) else 0.0
             except:
                 return 0.0
 
@@ -119,9 +135,8 @@ class RagasJudge:
         final_score = (c_score * 0.5) + (f_score * 0.3) + (r_score * 0.2)
         scaled_score = round(final_score * 10, 1)
         
-        is_remedial = (scaled_score < 6.0) or (f_score < 0.4)
+        is_remedial = (scaled_score < 7.0) 
         
-        # Combine score and detailed feedback
         full_feedback = f"[{scaled_score}/10] {qualitative_feedback}"
 
         return JudgeResult(

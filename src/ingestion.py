@@ -27,8 +27,6 @@ class MarkerIngestion:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # --- NEW: Cache Check ---
-        # e.g., "data/paper.pdf" -> "data/paper.txt"
         cache_path = os.path.splitext(file_path)[0] + ".txt"
         
         if os.path.exists(cache_path):
@@ -54,13 +52,11 @@ class MarkerIngestion:
         
         final_text = self.sanitize_content(full_text)
 
-        # --- NEW: Save Cache ---
         try:
             with open(cache_path, "w", encoding="utf-8") as f:
                 f.write(final_text)
             print(f"Cached ingested text to: {cache_path}")
         except Exception as e:
             print(f"Warning: Failed to save cache file ({e})")
-        # -----------------------
         
         return final_text

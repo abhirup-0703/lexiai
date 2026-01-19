@@ -7,9 +7,6 @@ from .models import ExamPlan
 
 class CognitivePlanner:
     def __init__(self):
-        # Uses Config.MODEL_NAME (Flash) as requested.
-        # We increase temperature slightly to 0.3 to avoid repetitive/boring questions,
-        # relying on the strict JSON schema to keep structure.
         self.llm = ChatGoogleGenerativeAI(
             model=Config.MODEL_NAME,
             google_api_key=Config.GOOGLE_API_KEY,
@@ -17,9 +14,21 @@ class CognitivePlanner:
         )
 
     def _clean_json_string(self, raw_string: str) -> str:
+        # 1. Remove Markdown
         clean = re.sub(r"```json\s*", "", raw_string)
         clean = re.sub(r"```\s*$", "", clean)
-        return clean.strip()
+        clean = clean.strip()
+        
+        # 2. Attempt parsing to see if it's already valid
+        try:
+            json.loads(clean)
+            return clean
+        except json.JSONDecodeError:
+            # 3. Repair: Fix invalid escapes (common with LaTeX/Paths in LLM output)
+            # Regex finds backslashes NOT followed by valid JSON escape chars (" \ / b f n r t u)
+            # and escapes them (e.g., \alpha -> \\alpha)
+            clean = re.sub(r'\\(?![/u"\\bfnrt])', r'\\\\', clean)
+            return clean
 
     def generate_exam_plan(self, context_text: str, enable_refinement: bool = True) -> ExamPlan:
         # Safe limit for Flash context
@@ -35,7 +44,6 @@ class CognitivePlanner:
         return self._refine_plan(initial_plan, safe_context)
 
     def _generate_initial_pass(self, context: str) -> ExamPlan:
-        # UPDATED: Skeleton now includes 'exemplar_answer' for better grading
         json_skeleton = """
         {
           "topic": "Specific Subject Title",
@@ -54,7 +62,6 @@ class CognitivePlanner:
         }
         """
         
-        # UPDATED: Prompt forces Bloom's Taxonomy and detailed rubrics
         system_prompt = f"""
         You are a rigorous Academic Examiner. Your goal is to test deep understanding, not just memory.
         Analyze the text and generate an exam plan in STRICT JSON format.
@@ -75,6 +82,7 @@ class CognitivePlanner:
         3. **Constraints**:
             - Questions must be answerable *only* using the provided context.
             - Do not give away the answer in the question itself (No Leakage).
+            - **IMPORTANT**: Escape all backslashes in the output (e.g. use \\\\alpha for LaTeX).
 
         JSON Skeleton: {json_skeleton}
         """
@@ -84,14 +92,12 @@ class CognitivePlanner:
             HumanMessage(content=f"Context:\n{context}")
         ]
         
-        # We use a larger max_tokens to allow for the detailed JSON
         response = self.llm.invoke(messages)
         return self._parse_and_validate(response.content)
 
     def _refine_plan(self, initial_plan: ExamPlan, context: str) -> ExamPlan:
         current_json = initial_plan.model_dump_json()
         
-        # UPDATED: Adversarial prompt to fix "easy" questions
         system_prompt = """
         You are a Critical Quality Assurance Editor. Your job is to make the exam harder and fairer.
         
@@ -102,6 +108,7 @@ class CognitivePlanner:
         2. **Check for Ambiguity**: Is the grading criteria too vague (e.g., "Answers may vary")? If yes, replace it with specific facts from the text.
         3. **Check Progression**: Does the final question actually require evaluation/synthesis? If it's just a lookup, rewrite it to be harder.
         4. **Verify Exemplars**: Ensure the "exemplar_answer" is actually correct based on the text.
+        5. **Escape Characters**: Ensure all LaTeX backslashes are double-escaped.
         
         Output ONLY the fixed JSON.
         """
@@ -111,7 +118,6 @@ class CognitivePlanner:
             HumanMessage(content=f"Original Text Context (for verification):\n{context}\n\nCurrent Draft Plan:\n{current_json}")
         ]
         
-        # Lower temp to 0.1 to ensure it sticks to the structure while fixing logic
         self.llm.temperature = 0.1
         response = self.llm.invoke(messages)
         return self._parse_and_validate(response.content)
@@ -131,6 +137,5 @@ class CognitivePlanner:
             return ExamPlan(**parsed)
         except Exception as e:
             print(f"Validation Error: {e}")
-            # Fallback: detailed error printing to help debug LLM output
             print(f"Failed JSON snippet: {raw_json[:500]}...") 
             raise

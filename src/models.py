@@ -11,7 +11,6 @@ def normalize_rubric(v):
 class GradingRubric(BaseModel):
     key_concepts: List[str] = Field(default=[], alias="concepts") 
     criteria: str = Field(..., alias="grading_criteria")
-    # NEW: Added exemplar field to capture the planner's output
     exemplar: Optional[str] = Field(default=None, alias="exemplar_answer")
     model_config = ConfigDict(populate_by_name=True)
 
@@ -27,10 +26,10 @@ class ExamPlan(BaseModel):
     questions: List[ExamQuestion]
     model_config = ConfigDict(populate_by_name=True)
 
-# LangGraph State
 class InterviewState(TypedDict):
     exam_plan: dict                 
     current_q_index: int            
     history: Annotated[List[str], operator.add] 
     last_judge_result: Optional[dict] 
     retry_count: int
+    followup_question: Optional[dict]
